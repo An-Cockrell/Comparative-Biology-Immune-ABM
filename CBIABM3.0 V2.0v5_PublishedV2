@@ -1,0 +1,2162 @@
+breed [epis epi]
+breed [infected-epis infected-epi] ; Start apoptosis pathway, make T1IFN
+breed [initial-inoculum-makers initial-inoculum-maker]
+breed [dead-epis dead-epi]
+breed [apoptosed-epis apoptosed-epi]
+
+
+breed [Lymphnodes Lymphnode] ;; simulated location of lymph nodes, operate off screen, hold Naive CD cells, DCs jump to. Start with 5
+
+;; immune cells
+breed [PMNs PMN] ; do not start with any PMNs on the screen (as this is tissue) Are recruited by endothelial-activation, live for 6 hours (36 steps)
+breed [DCs DC] ; chemotax to T1INF, Function produce IL12, IFNg and IL6, traffic to lymph nodes, present antigen to naive CD8 => cytotoxCD8s
+breed [macros macro] ; chemotax to T1INF, IFNg, IL17(?), pro- produce IL6, IL1, anti- produce IL10, phagocytose
+breed [NKs NK] ; activated by T1IFN, IL2, function to kill infected cells on contact (either apoptosis or lysis), make IFNg
+
+breed [activated-endos activated-endo] ;; this is in lieu of  full screen of EC agents (ala IIRABM) This will presume that there is an endothelial
+                       ;; cell associated with each epi cell, and that signaling or DAMPs will lead to activation of the EC. This is a counter that approximates
+                       ;; the time it takes to cause a PMN to adhere and migrate to the site (hatch function?)...need to figure out a way
+                       ;; to slow this down so everything doesn't happen at once
+                       ;; does not reset to unactivated (die) until patch is cleared of dead/apoptosed epis
+
+globals [ ;; currently 1 tick = 10 min, 6 ticks = 1 hours, 1000 ticks ~ 7 days
+  hours
+  days
+  %system-health ;; percentage of healthy epi cells (total 2601)
+  apoptosis-eaten-counter ;; keeps track of # apoptosed-epis phagocytosed
+  pyroptosed-macros
+
+  viremia ;; this is a global that keeps track of viruses that leak out of tissue (INACTIVE)
+
+  total-T1IFN
+  total-IFNg
+  total-TNF
+  total-IL6
+  total-IL1
+  total-IL8
+  total-IL10
+  total-IL12
+  total-IL18
+  total-P/DAMPS
+
+  total-extracellular-virus
+  total-intracellular-virus
+]
+turtles-own [
+
+  age
+
+  ;; Virus related variables
+  infected?
+  intracellular-virus
+  viral-carrying-capacity ;; this is the number of intracellular virus before the cell bursts and releases viruses
+  resistance-to-infection ;; (this is the opposite of viral receptors)
+  replication-counter ;; this is keeps track of how long it takes to reach initial viral particles
+  cell-membrane ;; this number is what is consumed with viral excytosis, when reaches 0 cell dies
+
+  ;; Cell death variables
+  ;; Apoptosis
+  apoptosis-counter ;; this the interal counter that leads to apoptosis
+  apoptosis-threshold ;; this is the level where the apoptosis-counter leads to death, NOTE this number must be > viral-incubation-threshold or no virus is released
+
+  ROS-damage-counter ;; this keeps track of how much ROS damage cell gets, if above threshold (arbitrary at 50 now) then coverts to dead-epi
+
+  ;; dc specific variables NOT CURRENTLY ACTIVE in V2.0
+  dc-location ;; this is a chooser with either "LymphNode" or "tissue". If "tissue" then interact with screen, If "LN" then interact with NaiveCD8s off screen
+  trafficking-counter ;; Trafficking is simulated by jump to on-of NaiveCD8s, then Trafficking-counter upticks until engagement => initial approximation = 6 hours = 36 ticks
+  antigen? ;; this is antigen picked up by DC when encounters infected epi, initiates trafficking
+
+  ;; macro specific variables
+  macro-activation-level
+  macro-phago-limit ;; this is the maximal amount a macrophage can phagocytose, initially arbitrarily set at 1000, all macros get full, increase to 10,000 to see what happens
+  macro-phago-counter ;; this keeps track of how "full" macro is = cells-eaten + (virus-eaten / 10)
+  pyroptosis-counter ;; counts how long it takes activated inflammasome to produce pyroptosis => 120 minutes per Community Development Paper
+  virus-eaten
+  cells-eaten
+
+    ;; Pyroptosis (and inflammation)
+  ;; activation variable between DAMPS/PAMPS/Intracellular virus (?) sends cell behavior path to inflammatory death vs apoptosis
+  ;; also target for difference between bat and human
+  ;; activated by P/DAMPS
+  ;; activation leads to IL1/IL18 production, caspase-1/pyroptosis, NFkB => TNF and IL10
+  pre-IL1 ;; made during pyroptoptosis activation after inflammasome activated, released as IL1 when cell dies
+  pre-IL18 ;; similar function for IL18
+  inflammasome-primed
+  inflammasome-active
+
+  ;; activated-endo specific variables
+  adhesion-counter ;; PMN adhesion-migration takes 6-12 hours; 36 ticks = 6 hours
+]
+
+patches-own [
+  extracellular-virus
+
+  epi-regrow-counter ;; this determines time it takes for empty patch to regrow an epi cell if neighbors > 2. Currently set at 3 days = 432 ticks
+
+  endothelial-activation ;; this is in lieu of EC agents (ala IIRABM) This will presume that there is an endothelial cell associated with
+                       ;; each epi cell, and that signaling or DAMPs will lead to activation of the EC. This is a counter that approximates
+                       ;; the time it takes to cause a PMN to adhere and migrate to the site (hatch/sprout function?)...need to figure out a way
+                       ;; to slow this down so everything doesn't happen at once
+                       ;; does not reset to 0 until patch is cleared of dead/apoptosed epis
+
+  P/DAMPS ;; produced by when cells die by some other means than apoptosis. Primarily now macros by pyroptosis
+  ROS ;; Produced by PMNs during respiratory burst
+
+  ;; mediators
+  PAF ;; Made by activated-endos, Functions to chemotax for PMNs
+  TNF ;; Made by pro macros. Functions stim pro macros to make IL1, chemotaxis for PMNs, activate Endo adhesion, +/- apoptosis (NFkB vs MAPK)
+  IL1 ;; Made by pro macros during inflammasome activation and released at pyroptosis and PMNs,
+      ;; Functions activate endothelium (PMN adhesion), inhibit PMN and macro apoptosis, promote TH17 cells
+  IL18 ;; Made by infected-epis and pro macros during inflammasome activation and released at pyroptosis, function is to allow NK cells to make IFNg
+  IL2 ;; Made by TH1 and cytotoxic CD8, Functions promotes TH0 to TH1/2 inhibit TH17, enhances Tcell apoptosis (clonal deletion)
+  IL4 ;; Made by TH2, Functions convert TH0 to TH2, produces anti-macros (increased IL10 production), decrease DC production IL12
+  IL6 ;; Made by pro-Macros (DAMP + IL1 + TNF activated) (+0.4) DCs (+0.4) and infected-epis (+0.1), Function down regulate TNF and IL1, activate IL1ra and IL10, promote TH2, reduce IFNg from CytoCD4
+      ;; increase IL-4 production for cytotoxic CD4, shift TH0 to TH17, inhibit IL17 induced apoptosis
+  IL8 ;; Made by pro-Macros, Function is chemotaxis for PMNs
+  IL10  ;; Made by macros (pro and anti) and DCs (not yet), Function: included in macro activation calculation to determine pro vs anti macros
+        ;; PROBLEM: made by anti-macros => what shuts them off?
+  IL12 ;; Made by DC (+ 0.5) and Macros (+0.5), Function covert TH0 to TH1
+  IL17 ;; Made by TH17, Function induce chemotaxis (via chemokines) for macros and PMNs, induce apoptosis in infected cells
+  IFNg ;; Made by NK, APC/DCs, TH1, antigen specific cytotoxic CD8, Functions activate NK, convert TH0 to TH1, activate proinflam macros
+  T1IFN ;; Made by virus infected cells, NK and cytotoxic CD4, Functions to chemotax and activate NK and macros, activates apoptosis
+
+]
+
+to setup
+  ca
+  reset-ticks
+  if RandomRuns? = false
+    [random-seed RandomSeed]
+
+  ask patches
+  [sprout 1
+    [set breed epis ;; 1 epi per patch
+     set shape "square"
+     set color blue
+     set intracellular-virus 0
+     set viral-carrying-capacity 500 ;;  arbitrary, maybe make slider. Lower numbers kill but don't spread, defines incubation time
+     set resistance-to-infection 75 ;; arbitrary, maybe make slider
+     set cell-membrane 975 + random 51 ;; this is what is consumed by viral excytosis, includes some random component so all cells don't die at the same time
+     set apoptosis-counter 0
+     set apoptosis-threshold 450 + random 100 ;; this is half the cell-membrane, which means total amount of leaked virus should be half with apoptosis active, has random component as well
+     if bat? = true ;; help initialize baseline level production of T1IFN in bats
+       [if random 100 = 1
+        [set T1IFN 5]
+      ]
+    ]
+  ]
+
+
+ create-NKs 25 ;; Initial-NKs slider for later
+  [set color orange
+    set shape "circle"
+    set size 1
+    repeat 100
+    [jump random 1000]
+  ]
+
+ create-Macros 50 ;;Initial-Macros slider for later
+  [set color green
+    set shape "circle"
+    set size 1
+    repeat 100
+    [jump random 1000]
+    set macro-phago-limit 1000 ;; aribitrary number
+    set color green
+    set pre-IL1 0
+    set pre-IL18 0
+    set inflammasome-primed false
+    set inflammasome-active false
+    set macro-activation-level 0
+    set macro-phago-counter 0
+    set pyroptosis-counter 0
+    set virus-eaten 0
+    set cells-eaten 0
+  ]
+
+ create-DCs 50 ;; Initial-DCs slider for later
+  [set color cyan
+    set shape "triangle"
+    set size 1.5
+    set DC-location "tissue"
+    set trafficking-counter 0
+    repeat 100
+    [jump random 1000]
+  ]
+
+set %system-health count epis / 2601 * 100
+end
+
+to infect
+create-initial-inoculum-makers initial-inoculum ;; this is just to make a random distribution of inoculum
+ [set color red
+  repeat 10
+   [jump random 1000]
+  set extracellular-virus 80 + random 40 ;; this random is to try and "smooth" things out
+  die
+ ]
+ask patches
+  [set-background]
+end
+
+to go ;; system "dies" at 80% epi death = 2080
+
+if ticks = stopping-tick ;; Length of run can be controlled using "stopping-tick" slider. Note that this may need to be modified if running experiments in Behavior Space
+  [stop]
+if ticks mod 6 = 0 ;; 1 tick = 10 minutes
+  [set hours hours + 1 ;; 1 hour = 6 ticks
+    if hours mod 24 = 0
+      [set days days + 1] ;; 1 day = 144 ticks, 3 days = 432 ticks, 5 days = 720 ticks, 7 days = 1008 ticks, 14 days = 2016, 28 days = 4032 ticks
+  ]
+tick
+if count apoptosed-epis + count dead-epis >=  2080 ;; this is 80% of the epi cells dead (total epis = 2601)
+  [stop]
+
+    ;;sum cytokines and variables
+  set total-T1IFN sum [T1IFN] of patches
+  set total-TNF sum [TNF] of patches
+  set total-IFNg sum [IFNg] of patches
+  set total-IL6 sum [IL6] of patches
+  set total-IL1 sum [IL1] of patches
+  set total-IL8 sum [IL8] of patches
+  set total-IL10 sum [IL10] of patches
+  set total-IL12 sum [IL12] of patches
+  set total-IL18 sum [IL18] of patches
+  set total-extracellular-virus sum [extracellular-virus] of patches
+  set total-intracellular-virus sum [intracellular-virus] of infected-epis
+
+
+  set %system-health count epis / 2601 * 100
+
+ask dead-epis
+  [dead-epi-function]
+ask PMNs
+  [PMN-function]
+ask Macros
+  [Macro-function]
+ask NKs
+  [NK-function]
+ASK DCS
+  [DC-function]
+ask activated-endos
+  [activated-endo-function]
+
+ask epis
+  [epi-function]
+
+  set total-P/DAMPS sum [P/DAMPs] of patches ;; need to calculate here, if calculate after diffuse/evaporate/cleanup there is no value for threshold < 0.13
+
+ask infected-epis
+  [infected-epi-function]
+
+diffuse-functions
+
+;; this is to remove low levels of extracellular variables
+ask patches
+  [regrow-epis
+   set-background
+   evaporate ;; This order is important, if you put evaporate after cleanup you never get decent levels of cytokine
+   cleanup
+ ]
+
+
+end
+
+to infected-epi-function
+
+;; necrosis from PMN burst
+if ROS-damage-counter > 10
+  [set breed dead-epis
+   set color grey
+   set size 1
+   set shape "circle"
+   set P/DAMPs P/DAMPS + 10
+  ]
+set ROS-damage-counter ROS-damage-counter + ROS
+
+virus-replicate
+
+epi-apoptosis
+
+set T1IFN T1IFN + 1 ;; update by 1 appears to have too much T1IFN?
+set IL18 IL18 + 0.11 ;; ? this rule?
+if IL1 + TNF > 1
+  [set IL6 IL6 + 0.10] ;; production shared with Macros and DCs, depends on IL1 and TNF production
+
+end
+
+to virus-invade-cell ;; called in epi-function and macro-function
+;; what I want here is to have the likelyhood of invasion of the epi on the patch be a function of the number of extracellular-viruses on that patch
+;; Epi has resistance-to-invasion, higher numbers better to protect against invasion
+;; As currently written, lowering resistance to infection results in smaller initial intracellular virus, prolonging incubation,
+;; can affect by altering viral-incubation-rate (slider)
+;if random extracellular-virus > resistance-to-infection ;; if this is true then the virus invades
+if extracellular-virus > 0
+[ if random 100 < (max list susceptability-to-infection extracellular-virus) ;; this is a new virus invade criteria, says a % chance infection against higher of resistance or virus present
+  ; so if very high extracellular virus then likely to invade, if very low extracellular virus still possibility it will invade. High values susceptability = worse
+  ; if suceptability = 0 should have full resistance
+  [set intracellular-virus intracellular-virus + 1
+   set extracellular-virus extracellular-virus - 1 ;; virus from outside goes inside
+   if breed = epis
+    [set breed infected-epis
+     set shape "square"
+     set color yellow
+    ]
+ ;  if breed = macros
+ ;   [set infected? true
+ ;    set color yellow
+ ;   set shape "circle"
+ ;   ]
+  ]
+  ]
+end
+
+to virus-replicate ;; called in infected-epi-function
+  ;; extrusion of virus will consume cell-membrane, when this goes to 0 cell dies (no viral burst but does produce P/DAMPS)
+
+if cell-membrane <= 0
+  [set breed dead-epis
+   set color grey
+   set P/DAMPS P/DAMPS + 10
+ ; set extracellular-virus intracellular-virus
+ ]
+;; intracellular-virus is essentially a counter that determines time it takes to ramp up viral synthesis
+;; once the threshold viral-incubation-threshold is reached the cell leaks virus to extracellular-virus
+;; and takes one cell-membrane away until cell dies
+;; cell defenses to this is to apoptose, which causes the "virus factory" to die earlier
+
+if intracellular-virus > viral-incubation-threshold
+  [set extracellular-virus extracellular-virus + 1
+   set cell-membrane cell-membrane - 1
+  ]
+
+ifelse bat? = true
+  [set intracellular-virus max list 1 (intracellular-virus + 1 - (T1IFN / 10 ))];;  simulates T1IFN anti viral adaptations in bats,
+                                                                               ;;  does not eradicate virus though, just suppresses growth
+  [set intracellular-virus max list 0 (intracellular-virus + 1 - (T1IFN / 100))] ;; human manifestation of T1IFN anti viral effect
+
+end
+
+to epi-apoptosis
+  if apoptosis-counter > apoptosis-threshold
+   [set breed apoptosed-epis
+    set color grey
+    set shape "pentagon"
+    set size 1
+  ]
+  set apoptosis-counter apoptosis-counter + 1
+end
+
+to regrow-epis ;; patch command, regrows epis on empty patches if neighbors > 2 epis.
+if count epis-here + count dead-epis-here + count apoptosed-epis-here + extracellular-virus = 0 ;; makes sure it is an patch empty of epis
+ [if count epis-on neighbors > 2 ;; if conditions met, start counter
+    [if epi-regrow-counter >= 432 ;; regrows starting at 3 days if sufficient neighboring epis
+     [sprout 1
+       [set breed epis ;; 1 epi per patch
+        set shape "square"
+        set color blue
+        set intracellular-virus 0
+        set resistance-to-infection 75 ;; arbitrary, maybe make slider
+        set cell-membrane 975 + random 51 ;; this is what is consumed by viral excytosis, includes some random component so all cells don't die at the same time
+        set apoptosis-counter 0
+        set apoptosis-threshold 475 + random 51 ;; this is half the cell-membrane, which means total amount of leaked virus should be half with apoptosis active, has random component as well
+       ]
+      set epi-regrow-counter 0 ; if sprouts, reset counter to 0
+     ]
+    set epi-regrow-counter epi-regrow-counter + 1 ;; counts if enough neighbors
+    ]
+  ]
+
+
+end
+
+to PMN-function ;; OMNs are made in activated-endo-function
+if age > 36 ;; baseline 6 hour tissue lifespan
+  ;; once migrated into tissue committed to dying via burst
+  [set ROS ROS + 10
+   set IL1 IL1 + 1
+   die]
+
+;; chemotaxis to PAF and IL8
+let p max-one-of neighbors [PAF + IL8]
+  ifelse [PAF + IL8] of p > (PAF + IL8) and [PAF + IL8] of p != 0
+  [face p
+   fd 0.1
+   if count PMNs-here > 1 ;; This code block is to prevent stacking of macros on a single patch. IF there is a stack then they kill the infected more quickly
+    [set heading random 360
+      fd 1]
+  ]
+  [wiggle
+  ]
+
+ set age age + 1
+end
+
+to NK-function
+
+  ;; INDUCTION OF APOPTOSIS
+ask infected-epis-here
+ [set apoptosis-counter apoptosis-counter + 9]  ;; NKs enhance infected epi apoptosis 10x
+
+  ;;Production of cytokines
+if T1IFN > 0 and IL12 > 0 and IL18 > 0
+  [set IFNg IFNg + 1] ;; need to check this, apparently does not happen, needs IL18(?)
+
+  ;; Chemotaxis to T1IFN made by infected-epis, slows movement rate to 1/10 of uphill primitive
+let p max-one-of neighbors [T1IFN]  ;; or neighbors4
+  ifelse [T1IFN] of p > T1IFN and [T1IFN] of p != 0
+  [face p
+;;    if [count NKs] of patch-ahead 1 < 5
+   fd 0.1
+   if count NKs-here > 1 ;; This code block is to prevent stacking of NK cells on a single patch. IF there is a stack then they kill the infected more quickly
+    [set heading random 360
+      fd 1]
+  ]
+  [wiggle
+  ]
+
+  ;consumption IL18 and IL12
+set IL12 max list 0 IL12 - 0.1
+set IL18 max list 0 IL18 - 0.1
+end
+
+to macro-function
+
+; check to see if macro gets infected
+virus-invade-cell
+  ; macro-activation-level keeps track of M1 (pro) or M2 (anti) status
+  ; there is hysteresis because it modifies existing status
+set macro-activation-level macro-activation-level + T1IFN + P/DAMPS + IFNg + IL1 - (2 * IL10) ;; currently a gap between pro and anti macros
+
+  ;; separate out inflammasome mediated functions from other pro macro functions
+  ;; so IL1/IL18 production, induction of pyroptosis
+  ;; as with all sequential processes, inflammasome priming/activation/effects coded in reverse order
+inflammasome-function
+
+  ;; consumption of activating cytokines
+set T1IFN max list 0 T1IFN - 0.1
+set IFNg max list 0 IFNg - 0.1
+set IL10 max list 0 IL10 - 0.1
+set IL1 max list 0 IL1 - 0.1
+
+  ;; Chemotaxis to T1IFN made by infected-epis, slows movement rate to 1/10 of uphill primitive. Also chemotaxis to DAMPs
+let p max-one-of neighbors [T1IFN + P/DAMPS]  ;; or neighbors4
+  ifelse [T1IFN + P/DAMPS] of p > (T1IFN + P/DAMPS) and [T1IFN + P/DAMPS] of p != 0
+  [face p
+;;    if [count NKs] of patch-ahead 1 < 5
+   fd 0.1
+   if count Macros-here > 1 ;; This code block is to prevent stacking of macros on a single patch. IF there is a stack then they kill the infected more quickly
+    [set heading random 360
+      fd 1]
+  ]
+  [wiggle
+  ]
+    ;;PHAGOCYTOSIS LIMIT check
+  ;; check for macro-phago-limit
+  set macro-phago-counter max list 0 (cells-eaten + (virus-eaten / 10) - macro-phago-recovery);; macro-phago-recovery decrements counter to simulate internal processing, proxy for new macros
+                                                                                              ;; =2 => Exp 5
+  ifelse macro-phago-counter >= macro-phago-limit ;; this will eventually be pyroptosis
+    [set size 2]
+    [;; PHAGOCYTOSIS
+    set size 1
+    ;; of virus, uses local variable "q" to represent amount of virus eaten (avoid negative values)
+    if extracellular-virus > 0
+     [let q max list 0 (extracellular-virus - 10) ;; currently set as arbitrary 10 amount of extracellular virus eaten per step
+      set extracellular-virus extracellular-virus - q
+      set virus-eaten virus-eaten + q
+     ]
+    ;; of apoptosed epis
+    if count apoptosed-epis-here > 0
+     [ask apoptosed-epis-here [die]
+      set cells-eaten cells-eaten + 1
+      set apoptosis-eaten-counter apoptosis-eaten-counter + 1
+     ]
+   ;; of dead epis
+    if count dead-epis-here > 0
+     [ask dead-epis-here [die]
+      set cells-eaten cells-eaten + 1
+     ]
+  ]
+
+if macro-activation-level > 5 ;; This is where decreased sensativity to P/DAMPS can be seen. Link macro-activation-level to Inflammasome variable?
+                              ;; increased from 1.1 to 5 for V1.1
+ [;; Proinflammatory cytokine production
+  if IL1 + P/DAMPS > 0 ;; these are downstream products of NFkB, which either requires infammasome activation or TLR signaling
+    [set TNF TNF + 1
+     set IL6 IL6 + 0.4 ;; split with DCs and infected-epis, dependent on IL1
+ ;; set IL1 IL1 + 1 => Moved to Inflammasome function
+    ;; Anti-inflammatory cytokine production
+    set IL10 IL10 + 1
+    ]
+  set IL8 IL8 + 1 ;; believe this is NFkB independent
+  set IL12 IL12 + 0.5 ;; split with DCs Don't know if this is based on NFkB activation
+
+  set macro-activation-level macro-activation-level - 5 ;; this is to simulate macrophages returning to baseline as intracellular factors lose stimulation
+ ]
+
+if macro-activation-level < -5 ;; this keeps macros from self activating wrt IL10 in perpetuity
+  [set color pink ;; tracker
+  ;; Antiinflammatory cytokine production
+  set IL10 IL10 + 0.5
+
+  set macro-activation-level macro-activation-level + 5 ;; this is to simulate macrophages returning to baseline as intracellular factors lose stimulation
+  ]
+end
+
+to inflammasome-function
+ ;; inflammasome effects
+
+  if pyroptosis-counter > 12  ;; 120 minutes
+  [pyroptosis]
+
+  if inflammasome-active = true ;; this is coded this way to draw out the release of IL1 and IL18 (make less jumpy)
+    [set IL1 Il1 + 1
+     set pre-IL1 pre-IL1 + 5 ;; this means pre-IL1 will be 12 at time of burst, which is IL1 level at burst
+     set IL18 IL18 + 1
+     set pre-IL18 pre-IL18 + 0.5 ;; mimic IL1 at the moment, half amount generated though (arbitrary)
+     set pyroptosis-counter pyroptosis-counter + 1] ;; Pyroptosis takes 120 min from inflammasome activation to pyroptosis so counter threshold is 12
+
+  ;; stage 2 = activation of inflammasome => use virus-eaten as proxy for intracellular viral products, effects of phagocytosis
+  if inflammasome-primed = true
+   [if virus-eaten / 10 > inflammasome-activation-threshold ;; extra-, intra- and eaten virus in the scale of up to 100
+                                                          ;; macro-phago-limit set to 1000 (with virus-eaten / 10), activation thresholds ~ 50
+    [set inflammasome-active true
+     set shape "target"
+     set size 1.5
+    ]
+  ]
+
+  ;; stage 1 = Priming by P/DAMPS or TNF
+  if P/DAMPS + TNF > inflammasome-priming-threshold
+  [set inflammasome-primed true]
+;;  [set inflammasome "inactive"]
+
+end
+
+
+to pyroptosis
+set pyroptosed-macros pyroptosed-macros + 1
+set IL1 pre-IL1
+set IL18 pre-IL18
+set P/DAMPs P/DAMPs + 10
+hatch 1 ;; this maintains steady number of macrophages, thus this model does not simulate macrophage depletion via pyroptosis
+  [set color green
+   set shape "circle"
+   set size 1
+    move-to one-of patches with [count epis + count infected-epis > 0] ;; this has regenerated macros move to a random patch that isnt already dead
+   set macro-phago-limit 1000 ;; aribitrary number
+   set pre-IL1 0
+   set pre-IL18 0
+   set inflammasome-primed false
+   set inflammasome-active false
+   set macro-activation-level 0
+   set macro-phago-counter 0
+   set pyroptosis-counter 0
+   set virus-eaten 0
+   set cells-eaten 0
+  ]
+ die
+
+end
+
+
+to DC-function
+
+if DC-location = "tissue"
+  ;;Production of cytokines
+[if T1IFN > 1
+  [set IL12 IL12 + 0.5 ;; split with pro macros
+   if IL1 > 1
+      [set IL6 IL6 + 0.4] ;; split with pro macros and infected-epis, dependent on IL1 presence
+   set IFNg IFNg + 0.5
+  ]
+ ; consumption of mediators
+ set T1IFN max list 0 (T1IFN - 0.1)
+
+  ;; Chemotaxis to T1IFN made by infected-epis, slows movement rate to 1/10 of uphill primitive
+ let p max-one-of neighbors [T1IFN]  ;; or neighbors4
+  ifelse [T1IFN] of p > T1IFN and [T1IFN] of p != 0
+  [face p
+   fd 0.1
+    if count DCs-here > 1 ;; This code block is to prevent stacking of DCs on a single patch.
+    [set heading random 360
+      fd 1]
+
+     ;; THIS IS ANTIGEN RECOGNITION AND LN TRAFFICKING
+;    if count infected-epis-here > 0 ;; checks to see if on same patch as infected-epi, picks up antigen
+;     [set antigen? true
+;      set trafficking-counter trafficking-counter + 1
+;      if trafficking-counter > 12 ;; 2 hours in tissue after antigen engagement
+;        [move-to one-of LymphNodes
+;         set dc-location "LymphNode"
+;         set size 3
+;        ]
+;      ]
+   ]
+   [wiggle
+   ]
+
+  ]
+
+end
+
+to epi-function
+;; necrosis from PMN burst
+if ROS-damage-counter > 2
+  [set breed dead-epis
+   set color grey
+   set size 1
+   set shape "circle"
+   set P/DAMPs P/DAMPS + 10
+  ]
+set ROS-damage-counter ROS-damage-counter + ROS
+
+  metabolism
+  virus-invade-cell
+ if bat? = true
+  [baseline-T1IFN-generation
+  ]
+
+  ;; activates endothelium
+  ifelse bat? = false
+   [ if TNF + IL1 > human-endo-activation and count activated-endos-here = 0 ;; arbitrary level of TNF + IL1 => set at 5 for human, 10 for bat
+     [hatch 1
+      [set breed activated-endos
+       set color pink
+       set size 1.5
+       set shape "square 2"
+      ]
+
+
+
+      ;; simulates consumption of IL1 and TNF
+   set TNF max list 0 (TNF - 0.1)
+   set IL1 max list 0 (IL1 - 0.1)
+   ]
+  ]
+
+   [ if TNF + IL1 > bat-endo-activation and count activated-endos-here = 0 ;; arbitrary level of TNF + IL1 => set at 5 for human, 10 for bat
+     [hatch 1
+      [set breed activated-endos
+       set color pink
+       set size 1.5
+       set shape "square 2"
+      ]
+
+
+
+      ;; simulates consumption of IL1 and TNF
+   set TNF max list 0 (TNF - 0.1)
+   set IL1 max list 0 (IL1 - 0.1)
+   ]
+  ]
+end
+
+to dead-epi-function
+set P/DAMPs P/DAMPs + 1
+end
+
+to baseline-T1IFN-generation
+ if random 100 = 1
+      [set T1IFN T1IFN + 0.75
+ ]
+end
+
+to metabolism
+ if random 100 = 1
+      [set P/DAMPs P/DAMPs + metabolic-byproduct]
+end
+
+to activated-endo-function ;; are made in epi-function
+set PAF PAF + 1
+if TNF + IL1 < 0.5
+  [die]
+
+if adhesion-counter > 36 ;; 6 hours
+  [if random 10 = 9 ;; 10% chance each step a PMN is attracted
+    [hatch 1
+     set breed PMNs
+     set color white
+     set shape "circle"
+     set size 0.5
+     set age 0
+     ;; the following 2 lines are so that the PMNs just don't appear in the middle of the infection
+     set heading random 360
+     jump random 5
+    ]
+  ]
+set adhesion-counter adhesion-counter + 1
+
+end
+
+to diffuse-functions
+  diffuse extracellular-virus 0.05
+  diffuse T1IFN 0.1
+  diffuse PAF 0.1
+  diffuse ROS 0.1
+  diffuse P/DAMPs 0.1
+
+  diffuse IFNg 0.2
+  diffuse TNF 0.2
+  diffuse IL6 0.2
+  diffuse IL1 0.2
+  diffuse IL10 0.2
+  diffuse IL12 0.2
+  diffuse IL18 0.2
+
+  diffuse IL8 0.3
+
+
+
+end
+
+to set-background
+  if ?background = "virus"
+    [set pcolor scale-color red extracellular-virus 0 100]
+
+  if ?background = "T1IFN"
+    [set pcolor scale-color orange T1IFN 0 10]
+
+  if ?background = "IFNg"
+    [set pcolor scale-color green IFNg 0 10]
+
+  if ?background = "TNF"
+    [set pcolor scale-color violet TNF 0 10]
+
+  if ?background = "IL1"
+    [set pcolor scale-color blue IL1 0 10]
+
+  if ?background = "IL6"
+    [set pcolor scale-color magenta IL6 0 10]
+
+  if ?background = "IL10"
+    [set pcolor scale-color lime IL10 0 10]
+
+  if ?background = "PAF"
+    [set pcolor scale-color pink PAF 0 10]
+
+  if ?background = "IL8"
+    [set pcolor scale-color yellow IL8 0 10]
+
+  if ?background = "ROS"
+    [set pcolor scale-color red ROS 0 2]
+
+    if ?background = "P/DAMPS"
+    [set pcolor scale-color red P/DAMPS 0 0.5]
+
+  if ?background = "IL12"
+    [set pcolor scale-color cyan IL12 0 10]
+
+  if ?background = "IL18"
+    [set pcolor scale-color turquoise IL18 0 10]
+
+
+end
+
+to cleanup
+if extracellular-virus < 1
+  [set extracellular-virus 0]
+if T1IFN < 0.1
+  [set T1IFN 0]
+if IFNg < 0.1
+  [set IFNg 0]
+if TNF < 0.1
+  [set TNF 0]
+if IL6 < 0.1
+  [set IL6 0]
+if IL1 < 0.1
+  [set IL1 0]
+if IL10 < 0.1
+  [set IL10 0]
+if PAF < 0.1
+  [set PAF 0]
+if IL8 < 0.1
+  [set IL8 0]
+if ROS < 0.1
+  [set ROS 0]
+if IL12 < 0.1
+  [set IL12 0]
+if IL18 < 0.1
+  [set IL18 0]
+if P/DAMPS < 0.1
+  [set P/DAMPS 0]
+end
+
+to evaporate
+set T1IFN T1IFN * .99
+set IFNg IFNG * .99
+set TNF TNF * .99
+set IL6 IL6 * .99
+set IL1 IL1 * .99
+set IL10 IL10 * .99
+set PAF PAF * .9
+set IL8 IL8 * .99
+set ROS ROS * 0.9
+set IL12 IL12 * .99
+set IL18 IL18 * .99
+set P/DAMPS P/DAMPS * 0.9
+
+end
+
+to wiggle
+rt random 45
+lt random 45
+fd 0.1
+end
+@#$#@#$#@
+GRAPHICS-WINDOW
+570
+10
+986
+427
+-1
+-1
+8.0
+1
+10
+1
+1
+1
+0
+1
+1
+1
+-25
+25
+-25
+25
+0
+0
+1
+ticks
+30.0
+
+BUTTON
+8
+10
+74
+43
+NIL
+Setup
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+SLIDER
+5
+200
+135
+233
+Initial-inoculum
+Initial-inoculum
+0
+1000
+122.0
+1
+1
+NIL
+HORIZONTAL
+
+BUTTON
+8
+46
+74
+79
+NIL
+Infect
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+CHOOSER
+210
+10
+348
+55
+?background
+?background
+"virus" "T1IFN" "IFNg" "TNF" "IL1" "IL6" "IL10" "PAF" "IL8" "ROS" "P/DAMPS" "IL12" "IL18"
+0
+
+BUTTON
+10
+90
+73
+123
+NIL
+Go
+T
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+BUTTON
+5
+130
+93
+163
+Go-Once
+Go
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+PLOT
+999
+10
+1199
+130
+Viral Counts
+NIL
+NIL
+0.0
+10.0
+0.0
+10.0
+true
+true
+"" ""
+PENS
+"Extracellular" 1.0 0 -2674135 true "" "plot sum [extracellular-virus] of patches"
+"Intracellular" 1.0 0 -7171555 true "" "plot sum [intracellular-virus] of infected-epis"
+
+SWITCH
+85
+60
+210
+93
+RandomRuns?
+RandomRuns?
+1
+1
+-1000
+
+SLIDER
+86
+95
+206
+128
+RandomSeed
+RandomSeed
+0
+1000
+10.0
+1
+1
+NIL
+HORIZONTAL
+
+PLOT
+998
+133
+1198
+253
+Count Epis
+NIL
+NIL
+0.0
+10.0
+0.0
+10.0
+true
+true
+"" ""
+PENS
+"Infected" 1.0 0 -4079321 true "" "plot count infected-epis"
+"Dead" 1.0 0 -7500403 true "" "plot count dead-epis"
+"Apoptosed" 1.0 0 -14439633 true "" "plot count apoptosed-epis"
+
+MONITOR
+85
+10
+142
+55
+NIL
+Hours
+0
+1
+11
+
+MONITOR
+145
+10
+202
+55
+NIL
+Days
+0
+1
+11
+
+SLIDER
+375
+125
+559
+158
+viral-incubation-rate
+viral-incubation-rate
+0
+10
+1.0
+1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+374
+164
+557
+197
+viral-incubation-threshold
+viral-incubation-threshold
+60
+1000
+60.0
+1
+1
+NIL
+HORIZONTAL
+
+PLOT
+998
+256
+1198
+376
+TNF, IL1, IL6, IL10
+NIL
+NIL
+0.0
+10.0
+0.0
+10.0
+true
+true
+"" ""
+PENS
+"TNF" 1.0 0 -2674135 true "" "plot total-TNF"
+"IL6" 1.0 0 -13360827 true "" "plot total-IL6"
+"IL1" 1.0 0 -10649926 true "" "plot total-IL1"
+"IL10" 1.0 0 -5509967 true "" "plot total-IL10"
+
+SLIDER
+445
+235
+560
+268
+Initial-NKs
+Initial-NKs
+0
+100
+25.0
+1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+445
+276
+560
+309
+Initial-Macros
+Initial-Macros
+0
+100
+50.0
+1
+1
+NIL
+HORIZONTAL
+
+MONITOR
+220
+60
+331
+105
+NIL
+%System-Health
+2
+1
+11
+
+BUTTON
+355
+10
+443
+43
+Hide Epis
+ask epis\n [ht]
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+BUTTON
+455
+10
+548
+43
+Show Epis
+ask epis\n [show-turtle]
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+MONITOR
+305
+320
+442
+365
+NIL
+Count activated-endos
+17
+1
+11
+
+MONITOR
+170
+170
+250
+215
+NIL
+Count PMNs
+17
+1
+11
+
+BUTTON
+355
+50
+445
+83
+Hide Endos
+ask activated-endos\n[hide-turtle]
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+BUTTON
+455
+50
+550
+83
+Show Endos
+ask activated-endos\n[show-turtle]
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+SLIDER
+445
+320
+560
+353
+Initial-DCs
+Initial-DCs
+0
+100
+50.0
+1
+1
+NIL
+HORIZONTAL
+
+MONITOR
+305
+270
+445
+315
+NIL
+apoptosis-eaten-counter
+17
+1
+11
+
+MONITOR
+170
+220
+253
+265
+Full Macros
+count macros with [macro-phago-counter >= macro-phago-limit]
+17
+1
+11
+
+PLOT
+240
+375
+546
+495
+%System-Health
+NIL
+NIL
+0.0
+10.0
+0.0
+10.0
+true
+false
+"" ""
+PENS
+"default" 1.0 0 -16777216 true "" "plot %System-Health"
+
+SLIDER
+5
+240
+165
+273
+Metabolic-byproduct
+Metabolic-byproduct
+0
+3
+0.2
+0.01
+1
+NIL
+HORIZONTAL
+
+MONITOR
+220
+110
+324
+155
+NIL
+total-P/DAMPS
+2
+1
+11
+
+SLIDER
+0
+370
+210
+403
+inflammasome-priming-threshold
+inflammasome-priming-threshold
+0
+10
+1.0
+0.1
+1
+NIL
+HORIZONTAL
+
+MONITOR
+170
+270
+305
+315
+Primed Inflammasomes
+count macros with [inflammasome-primed = true]
+17
+1
+11
+
+SLIDER
+0
+410
+208
+443
+inflammasome-activation-threshold
+inflammasome-activation-threshold
+0
+100
+10.0
+5
+1
+NIL
+HORIZONTAL
+
+MONITOR
+170
+320
+305
+365
+Active Inflammasomes
+count macros with [inflammasome-active = true]
+17
+1
+11
+
+SLIDER
+350
+90
+558
+123
+macro-phago-recovery
+macro-phago-recovery
+0
+3
+0.5
+0.1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+375
+200
+565
+233
+susceptability-to-infection
+susceptability-to-infection
+0
+100
+77.0
+1
+1
+NIL
+HORIZONTAL
+
+SWITCH
+100
+130
+203
+163
+Bat?
+Bat?
+1
+1
+-1000
+
+PLOT
+997
+378
+1197
+528
+T1INF, IL18, IL12, IFNg
+NIL
+NIL
+0.0
+10.0
+0.0
+10.0
+true
+true
+"" ""
+PENS
+"T1IFN" 1.0 0 -5298144 true "" "plot total-T1IFN / 10"
+"IL18" 1.0 0 -14070903 true "" "plot total-IL18"
+"IFNg" 1.0 0 -13840069 true "" "plot total-IFNg"
+"IL12" 1.0 0 -612749 true "" "plot total-IL12"
+
+MONITOR
+255
+170
+345
+215
+Count Macros
+count macros
+17
+1
+11
+
+MONITOR
+255
+220
+375
+265
+NIL
+Pyroptosed-Macros
+17
+1
+11
+
+SLIDER
+5
+285
+165
+318
+human-endo-activation
+human-endo-activation
+0
+10
+5.0
+1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+0
+330
+160
+363
+bat-endo-activation
+bat-endo-activation
+0
+10
+10.0
+1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+5
+165
+135
+198
+Stopping-tick
+Stopping-tick
+0
+10000
+2016.0
+1
+1
+NIL
+HORIZONTAL
+
+BUTTON
+0
+450
+172
+483
+Restore Default Human
+set bat? false\nset ?background \"virus\"\nset stopping-tick 2016\nset randomruns? false\nset randomSeed 10\nset metabolic-byproduct 0.2\nset human-endo-activation 5\nset bat-endo-activation 10\nset inflammasome-priming-threshold 1.0\nset inflammasome-activation-threshold 10\nset macro-phago-recovery 0.5\nset viral-incubation-rate 1\nset viral-incubation-threshold 60\nset susceptability-to-infection 77\nset initial-NKs 25\nset initial-macros 50\nset initial-DCs 50
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+@#$#@#$#@
+Name of model: Comparative Biology Immune ABM (CBIABM)
+
+Purpose: Simulate those aspects of innate immune response different between bats and humas. These areas are:
+
+1. Decreased sensativity to P/DAMP due to high metabolic rate
+2 Decreased ramp up of T1IFNs in response to perturbation => intrinsic to this is that baseline is higher?
+3. Decreased inflammasome activation => consequences are decreased caspase-1 activation which leads to decreased IL1/IL18 and decreased pyroptosis
+4. Decreased processing/release of IL1
+
+=========================================================================================
+
+Guide to World view:
+
+The  World  view, consisting of the 51 x 51  square grid, can be seen on the right side of the User Interface. The following is a key to the agent shapes seen on that view:
+
+Blue Squares = Healthy Epithelial Cells
+Yellow Squares = Infected Epithelial Cells
+Grey Squares = Epithelial Cells killed by necrosis
+Grey Pentagons = Epithelial Cells killed by apoptosis
+Green Circles = Macrophages
+Large Green Circles = Macrophages at phagocytosis limit
+Orange Circles = NK Cells
+Light Blue Triangles = Dendritic Cells
+Pink Square Outlines = Activated Endothelial Cells
+Small White Circles = PMNs
+
+At initialization the entire world-space is filled with Healthy Epithelial Cells (Blue Squares). When dead Epithelial Cells of both types are cleared by phagocytosis what remains is black space, which can then be refilled be new Epithelial Cells as they heal (see main text for rules). The levels of extracellular virus and different mediators can be seen in the background behind the agents; see “Visualization Controls” below how to hide and reshow Epithelial and Endothelial Cells.
+
+=========================================================================================
+
+Modeled Behaviors and Functions
+
+Primary means of controlling virus is to kill infected epis
+Mechanisms:
+1. Infected-epis undergo apoptosis (eventually)
+2. NK cells enhance apoptosis
+3. Macros consume extracellular-virus => Not coupled to macro-activation or inflammasome activation
+
+Model behavior criteria:
+1. Bats have a higher baseline generation of P/DAMP, therefore macro-activation threshold is higher
+2. Ideally bats should have longer/persistent virus present, mostly intracellular, in dynamic equilibrium => decrease apoptosis (longer virus factory duration), decrease pyroptosis/macros-full => we know that in the model increasing full-macros leads to impaired viral clearance => Rely on epitheilial-mediated viral control (avoid full-macro point?)
+3. Ideally generate shedding state (extracellular virus) from baseline state by increasing P/DAMPs => "stress state"
+
+Modeling Baseline P/DAMP
+Called in "metabolism" command, has epi cells randomly generate "metabolic-byproduct" which is the update to P/DAMP.
+Random is 1/100, metabolic-byproduct slider from 0.1 to 1.0 updated by 0.01. Note: update of total-P/DAMP must occur prior to evap/diffuse/cleanup otherwise no detectable value
+
+Modeling Viral Infection and Replication
+
+Viral infecton and replication: stochastic process, but intial infection synchronizes, period of intracellular replication to reach threshold at which time infected cell starts to leak virus, leaking of virus consumes cell membrane until cell dies. NO BURST EFFECT, though cell death in this fashion leads to the production of P/DAMPs; supposition is that this does not occur due to apoptosis being activated. So hyperinflammation occurs either because epi apoptosis is interrupted (some viruses do this) or due to pyroptosis (less likely necrosis) of macros leads to P/DAMP production. 
+
+Virus invasion uses susceptability-to-infection as a variable for epi cells to be infected. The calcuation is random 100 < max list susceptability-to-infection extracellular-virus. This means more likely for invasion if higher extracellular-virus, but possibility exists if there are extracellular-virus present.
+Also, min value of extracellular-virus set to 1 (cleanup command), diffusion of extracellular virus changed to 0.05 (working with susceptability-to-infection = 25)
+
+Epi Cell Function:
+
+Epi cell death due to non-apoptosis => called in Epi-function
+Death by ROS produces + 10 P/DAMP
+
+Infected Epi cell functions:
+
+Epi cell apoptosis: Counter that starts with infection, leads to cell death prior to full cell membrane consumption point, effect is to reduce overall level of virus, but does not help infected cell. Dies without generating P/DAMPs.
+This version sets the epi-apoptosis-threshold to 450 + random 100, essentially half of the total cell membrane with randomness added. Earlier versions with 475 + random 50 and NK enhancement + 1 lead to pretty abrupt die-off just after Day 30.
+
+
+NK cell functions:
+
+NK cells chemotax to T1IFN, IL12 and IL18 (need all three to be present). Kills infected-epis by inducing faster apoptosis
+
+Macro Functions:
+
+Macros are now forced towards baseline inactivation, -1 with pro-, +1 with anti. Mostly impacts antis, allows recovery of IL10 levels
+
+There is a distinction between pro-inflammatory state (activation) and inflammasome activation, supposition is that the determination of the M1 macrophage phenotype involves more than just inflammasome activation
+
+Inflammasome Properties:
+
+Inflammasome activation 2nd stage based on virus-eaten, no function infection of macros.
+
+Role of IL1:
+IL6 or P/DAMPS are needed for activation of NFkB, which is needed for TNF, IL6 and IL10; these now get activated by IL1 + P/DAMP > 1
+IL1 more simply needed for IL6 production by macros and DCs, added to macro-activation-level determination (okay since it is not produced directly as part of that conditional statement), IL1 + TNF > 1 needed for infected-epi production of IL6
+Need to turn inflammasome priming down to 1.0 in order to get activation and production of IL1 (which then allows production of TNF, IL6 and IL10).
+IL1 and IL18 production, instead of build up and burst at pyroptosis releasing all at once, start producing IL1/IL18 upon inflammasome activation, with lessor burst at pyroptosis.
+
+
+Pyroptosis from activated inflammasome
+IL1 is now made as pre-IL1 during period between inflammasome activation and pyroptosis (120 minutes), pre-IL1 increments by + 10 so IL1 is 120 upon macro death
+Increases P/DAMPS + 10
+Creates a naive macro and jumps away (macro steady state)
+
+Anti-viral effect T1IFN
+
+Adds ability to have baseline T1IFN generation => bats do this
+Controled by Switch
+Random 100 = 1 => Set T1IFN + 0.15
+Adds antiviral effect T1IFN => inihibits viral-replication by - T1IFN/10 on viral replication, does not eradicate but keeps minimum of 1 (human = - T1IFN/100)
+Infected Epis make T1IFN + 1 and IL18 + 0.11
+ 
+Bat Baseline Metabolism-byproduct = 0.5
+Note for non-bat inflammasome-prime-threshold needs to be 1.0 in order to get priming for pyroptosis
+
+Endothelial activation and PMN burst:
+1. Endothelial activation by TNF + IL1 > endothelial-activation slider (difference between bat = 10 and human = 5 at baseline)
+2. Once activated make PAF + 1 and stay activated until TNF + IL1 < 0.5 (arbitrary)
+3. After 36 steps (6 hrs) representing adhesion activation, 10% chance will hatch PMN
+4. Adhesed PMNs jump random 5 upon arrival (prevents self containment)
+5. PMN will live 6 hrs (36 steps) in tissue then undergo respiratory burst and produce ROS + 10 and IL1 + 1
+5. Epis and Infected-Epis will die with ROS-counter > 10 (+ ROS per step); this mode of death (dead-epis) will lead to P/DAMP + 10
+6. Dead-epis now make P/DAMPS + 1 until they are phagocytosed
+
+=========================================================================================
+
+Simulation Experiments (Also see Behavior Space)
+
+*NOTE: Simulation experiments are run with the "Random-Runs" switch "Off", stochastic replicates achieved by incrementing the random number seed by 1 to the number of stochastic replicates desired. This is done to allow tracing of specific runs (by seed); this allows the potential for deeper examination of specific run.
+
+For Parameter sweeps:
+Baseline Bat
+Bat? = true
+Metabolic-byproduct = 2.0
+Inflammasome-priming-threshold = 5.0
+Inflammasome-activation-threshold = 50
+Bat-endo-activation = 10
+
+Baseline Human
+Bat? = false
+Metabolic-byproduct = 0.2
+Inflammasome-priming-threshold = 1.0
+Inflammasome-activation-threshold = 10
+Human-endo-activation = 5
+
+Initial Injury Sweeps (Figure 3a-b):
+Initial-inoculum from 25-150 increments of 25, run for 14 days (2016 steps)
+N = 1000 stochastic replicates
+Main Comparison is distribution of %System-health at the end of the run for each Initial-inoculum
+
+Evaluation of Effect of Endothelial Inflammasome (Figure 4)
+Uses Human parameterization EXCEPT sweep from Human-endo-activation from 5 to 10 (bat level).
+N = 250 Stochastic Replicates with Initial-Inoculum = 150
+
+Evaluation of Effect of Metabolic Stress on Bat Disease (Figure 5)
+Uses Bat Parameterization EXCEPT sweep of metabolic-byproduct from 2 to 10
+N = 250 Stochastic Replicates with Initial-Inoculum = 150
+@#$#@#$#@
+default
+true
+0
+Polygon -7500403 true true 150 5 40 250 150 205 260 250
+
+airplane
+true
+0
+Polygon -7500403 true true 150 0 135 15 120 60 120 105 15 165 15 195 120 180 135 240 105 270 120 285 150 270 180 285 210 270 165 240 180 180 285 195 285 165 180 105 180 60 165 15
+
+arrow
+true
+0
+Polygon -7500403 true true 150 0 0 150 105 150 105 293 195 293 195 150 300 150
+
+box
+false
+0
+Polygon -7500403 true true 150 285 285 225 285 75 150 135
+Polygon -7500403 true true 150 135 15 75 150 15 285 75
+Polygon -7500403 true true 15 75 15 225 150 285 150 135
+Line -16777216 false 150 285 150 135
+Line -16777216 false 150 135 15 75
+Line -16777216 false 150 135 285 75
+
+bug
+true
+0
+Circle -7500403 true true 96 182 108
+Circle -7500403 true true 110 127 80
+Circle -7500403 true true 110 75 80
+Line -7500403 true 150 100 80 30
+Line -7500403 true 150 100 220 30
+
+butterfly
+true
+0
+Polygon -7500403 true true 150 165 209 199 225 225 225 255 195 270 165 255 150 240
+Polygon -7500403 true true 150 165 89 198 75 225 75 255 105 270 135 255 150 240
+Polygon -7500403 true true 139 148 100 105 55 90 25 90 10 105 10 135 25 180 40 195 85 194 139 163
+Polygon -7500403 true true 162 150 200 105 245 90 275 90 290 105 290 135 275 180 260 195 215 195 162 165
+Polygon -16777216 true false 150 255 135 225 120 150 135 120 150 105 165 120 180 150 165 225
+Circle -16777216 true false 135 90 30
+Line -16777216 false 150 105 195 60
+Line -16777216 false 150 105 105 60
+
+car
+false
+0
+Polygon -7500403 true true 300 180 279 164 261 144 240 135 226 132 213 106 203 84 185 63 159 50 135 50 75 60 0 150 0 165 0 225 300 225 300 180
+Circle -16777216 true false 180 180 90
+Circle -16777216 true false 30 180 90
+Polygon -16777216 true false 162 80 132 78 134 135 209 135 194 105 189 96 180 89
+Circle -7500403 true true 47 195 58
+Circle -7500403 true true 195 195 58
+
+circle
+false
+0
+Circle -7500403 true true 0 0 300
+
+circle 2
+false
+0
+Circle -7500403 true true 0 0 300
+Circle -16777216 true false 30 30 240
+
+cow
+false
+0
+Polygon -7500403 true true 200 193 197 249 179 249 177 196 166 187 140 189 93 191 78 179 72 211 49 209 48 181 37 149 25 120 25 89 45 72 103 84 179 75 198 76 252 64 272 81 293 103 285 121 255 121 242 118 224 167
+Polygon -7500403 true true 73 210 86 251 62 249 48 208
+Polygon -7500403 true true 25 114 16 195 9 204 23 213 25 200 39 123
+
+cylinder
+false
+0
+Circle -7500403 true true 0 0 300
+
+dot
+false
+0
+Circle -7500403 true true 90 90 120
+
+face happy
+false
+0
+Circle -7500403 true true 8 8 285
+Circle -16777216 true false 60 75 60
+Circle -16777216 true false 180 75 60
+Polygon -16777216 true false 150 255 90 239 62 213 47 191 67 179 90 203 109 218 150 225 192 218 210 203 227 181 251 194 236 217 212 240
+
+face neutral
+false
+0
+Circle -7500403 true true 8 7 285
+Circle -16777216 true false 60 75 60
+Circle -16777216 true false 180 75 60
+Rectangle -16777216 true false 60 195 240 225
+
+face sad
+false
+0
+Circle -7500403 true true 8 8 285
+Circle -16777216 true false 60 75 60
+Circle -16777216 true false 180 75 60
+Polygon -16777216 true false 150 168 90 184 62 210 47 232 67 244 90 220 109 205 150 198 192 205 210 220 227 242 251 229 236 206 212 183
+
+fish
+false
+0
+Polygon -1 true false 44 131 21 87 15 86 0 120 15 150 0 180 13 214 20 212 45 166
+Polygon -1 true false 135 195 119 235 95 218 76 210 46 204 60 165
+Polygon -1 true false 75 45 83 77 71 103 86 114 166 78 135 60
+Polygon -7500403 true true 30 136 151 77 226 81 280 119 292 146 292 160 287 170 270 195 195 210 151 212 30 166
+Circle -16777216 true false 215 106 30
+
+flag
+false
+0
+Rectangle -7500403 true true 60 15 75 300
+Polygon -7500403 true true 90 150 270 90 90 30
+Line -7500403 true 75 135 90 135
+Line -7500403 true 75 45 90 45
+
+flower
+false
+0
+Polygon -10899396 true false 135 120 165 165 180 210 180 240 150 300 165 300 195 240 195 195 165 135
+Circle -7500403 true true 85 132 38
+Circle -7500403 true true 130 147 38
+Circle -7500403 true true 192 85 38
+Circle -7500403 true true 85 40 38
+Circle -7500403 true true 177 40 38
+Circle -7500403 true true 177 132 38
+Circle -7500403 true true 70 85 38
+Circle -7500403 true true 130 25 38
+Circle -7500403 true true 96 51 108
+Circle -16777216 true false 113 68 74
+Polygon -10899396 true false 189 233 219 188 249 173 279 188 234 218
+Polygon -10899396 true false 180 255 150 210 105 210 75 240 135 240
+
+house
+false
+0
+Rectangle -7500403 true true 45 120 255 285
+Rectangle -16777216 true false 120 210 180 285
+Polygon -7500403 true true 15 120 150 15 285 120
+Line -16777216 false 30 120 270 120
+
+leaf
+false
+0
+Polygon -7500403 true true 150 210 135 195 120 210 60 210 30 195 60 180 60 165 15 135 30 120 15 105 40 104 45 90 60 90 90 105 105 120 120 120 105 60 120 60 135 30 150 15 165 30 180 60 195 60 180 120 195 120 210 105 240 90 255 90 263 104 285 105 270 120 285 135 240 165 240 180 270 195 240 210 180 210 165 195
+Polygon -7500403 true true 135 195 135 240 120 255 105 255 105 285 135 285 165 240 165 195
+
+line
+true
+0
+Line -7500403 true 150 0 150 300
+
+line half
+true
+0
+Line -7500403 true 150 0 150 150
+
+pentagon
+false
+0
+Polygon -7500403 true true 150 15 15 120 60 285 240 285 285 120
+
+person
+false
+0
+Circle -7500403 true true 110 5 80
+Polygon -7500403 true true 105 90 120 195 90 285 105 300 135 300 150 225 165 300 195 300 210 285 180 195 195 90
+Rectangle -7500403 true true 127 79 172 94
+Polygon -7500403 true true 195 90 240 150 225 180 165 105
+Polygon -7500403 true true 105 90 60 150 75 180 135 105
+
+plant
+false
+0
+Rectangle -7500403 true true 135 90 165 300
+Polygon -7500403 true true 135 255 90 210 45 195 75 255 135 285
+Polygon -7500403 true true 165 255 210 210 255 195 225 255 165 285
+Polygon -7500403 true true 135 180 90 135 45 120 75 180 135 210
+Polygon -7500403 true true 165 180 165 210 225 180 255 120 210 135
+Polygon -7500403 true true 135 105 90 60 45 45 75 105 135 135
+Polygon -7500403 true true 165 105 165 135 225 105 255 45 210 60
+Polygon -7500403 true true 135 90 120 45 150 15 180 45 165 90
+
+sheep
+false
+15
+Circle -1 true true 203 65 88
+Circle -1 true true 70 65 162
+Circle -1 true true 150 105 120
+Polygon -7500403 true false 218 120 240 165 255 165 278 120
+Circle -7500403 true false 214 72 67
+Rectangle -1 true true 164 223 179 298
+Polygon -1 true true 45 285 30 285 30 240 15 195 45 210
+Circle -1 true true 3 83 150
+Rectangle -1 true true 65 221 80 296
+Polygon -1 true true 195 285 210 285 210 240 240 210 195 210
+Polygon -7500403 true false 276 85 285 105 302 99 294 83
+Polygon -7500403 true false 219 85 210 105 193 99 201 83
+
+square
+false
+0
+Rectangle -7500403 true true 30 30 270 270
+
+square 2
+false
+0
+Rectangle -7500403 true true 30 30 270 270
+Rectangle -16777216 true false 60 60 240 240
+
+star
+false
+0
+Polygon -7500403 true true 151 1 185 108 298 108 207 175 242 282 151 216 59 282 94 175 3 108 116 108
+
+target
+false
+0
+Circle -7500403 true true 0 0 300
+Circle -16777216 true false 30 30 240
+Circle -7500403 true true 60 60 180
+Circle -16777216 true false 90 90 120
+Circle -7500403 true true 120 120 60
+
+tree
+false
+0
+Circle -7500403 true true 118 3 94
+Rectangle -6459832 true false 120 195 180 300
+Circle -7500403 true true 65 21 108
+Circle -7500403 true true 116 41 127
+Circle -7500403 true true 45 90 120
+Circle -7500403 true true 104 74 152
+
+triangle
+false
+0
+Polygon -7500403 true true 150 30 15 255 285 255
+
+triangle 2
+false
+0
+Polygon -7500403 true true 150 30 15 255 285 255
+Polygon -16777216 true false 151 99 225 223 75 224
+
+truck
+false
+0
+Rectangle -7500403 true true 4 45 195 187
+Polygon -7500403 true true 296 193 296 150 259 134 244 104 208 104 207 194
+Rectangle -1 true false 195 60 195 105
+Polygon -16777216 true false 238 112 252 141 219 141 218 112
+Circle -16777216 true false 234 174 42
+Rectangle -7500403 true true 181 185 214 194
+Circle -16777216 true false 144 174 42
+Circle -16777216 true false 24 174 42
+Circle -7500403 false true 24 174 42
+Circle -7500403 false true 144 174 42
+Circle -7500403 false true 234 174 42
+
+turtle
+true
+0
+Polygon -10899396 true false 215 204 240 233 246 254 228 266 215 252 193 210
+Polygon -10899396 true false 195 90 225 75 245 75 260 89 269 108 261 124 240 105 225 105 210 105
+Polygon -10899396 true false 105 90 75 75 55 75 40 89 31 108 39 124 60 105 75 105 90 105
+Polygon -10899396 true false 132 85 134 64 107 51 108 17 150 2 192 18 192 52 169 65 172 87
+Polygon -10899396 true false 85 204 60 233 54 254 72 266 85 252 107 210
+Polygon -7500403 true true 119 75 179 75 209 101 224 135 220 225 175 261 128 261 81 224 74 135 88 99
+
+wheel
+false
+0
+Circle -7500403 true true 3 3 294
+Circle -16777216 true false 30 30 240
+Line -7500403 true 150 285 150 15
+Line -7500403 true 15 150 285 150
+Circle -7500403 true true 120 120 60
+Line -7500403 true 216 40 79 269
+Line -7500403 true 40 84 269 221
+Line -7500403 true 40 216 269 79
+Line -7500403 true 84 40 221 269
+
+wolf
+false
+0
+Polygon -16777216 true false 253 133 245 131 245 133
+Polygon -7500403 true true 2 194 13 197 30 191 38 193 38 205 20 226 20 257 27 265 38 266 40 260 31 253 31 230 60 206 68 198 75 209 66 228 65 243 82 261 84 268 100 267 103 261 77 239 79 231 100 207 98 196 119 201 143 202 160 195 166 210 172 213 173 238 167 251 160 248 154 265 169 264 178 247 186 240 198 260 200 271 217 271 219 262 207 258 195 230 192 198 210 184 227 164 242 144 259 145 284 151 277 141 293 140 299 134 297 127 273 119 270 105
+Polygon -7500403 true true -1 195 14 180 36 166 40 153 53 140 82 131 134 133 159 126 188 115 227 108 236 102 238 98 268 86 269 92 281 87 269 103 269 113
+
+x
+false
+0
+Polygon -7500403 true true 270 75 225 30 30 225 75 270
+Polygon -7500403 true true 30 75 75 30 270 225 225 270
+@#$#@#$#@
+NetLogo 6.1.1
+@#$#@#$#@
+@#$#@#$#@
+@#$#@#$#@
+<experiments>
+  <experiment name="V2.0v5 Fig 3B Bat Initial Inoculum Sweep Virus 25-150" repetitions="1" runMetricsEveryStep="false">
+    <setup>setup
+infect</setup>
+    <go>go</go>
+    <timeLimit steps="2016"/>
+    <metric>%system-health</metric>
+    <steppedValueSet variable="Initial-inoculum" first="25" step="25" last="150"/>
+    <steppedValueSet variable="RandomSeed" first="1" step="1" last="1000"/>
+    <enumeratedValueSet variable="Bat?">
+      <value value="true"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Metabolic-byproduct">
+      <value value="2"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="inflammasome-activation-threshold">
+      <value value="50"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="inflammasome-priming-threshold">
+      <value value="5"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Initial-DCs">
+      <value value="50"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Initial-NKs">
+      <value value="25"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="viral-incubation-rate">
+      <value value="1"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Initial-Macros">
+      <value value="50"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="?background">
+      <value value="&quot;IL1&quot;"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="viral-incubation-threshold">
+      <value value="60"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="macro-phago-recovery">
+      <value value="0.5"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="susceptability-to-infection">
+      <value value="77"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="RandomRuns?">
+      <value value="false"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="epi-apoptosis-on?">
+      <value value="true"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="bat-endo-activation">
+      <value value="10"/>
+    </enumeratedValueSet>
+  </experiment>
+  <experiment name="V2.0v5 Fig 3A Human Initial Inoculum Sweep Virus 25 -150" repetitions="1" runMetricsEveryStep="false">
+    <setup>setup
+infect</setup>
+    <go>go</go>
+    <timeLimit steps="2016"/>
+    <metric>%system-health</metric>
+    <steppedValueSet variable="Initial-inoculum" first="25" step="25" last="150"/>
+    <steppedValueSet variable="RandomSeed" first="1" step="1" last="1000"/>
+    <enumeratedValueSet variable="Bat?">
+      <value value="false"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Metabolic-byproduct">
+      <value value="0.2"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="inflammasome-activation-threshold">
+      <value value="10"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="inflammasome-priming-threshold">
+      <value value="1"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Initial-DCs">
+      <value value="50"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Initial-NKs">
+      <value value="25"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="viral-incubation-rate">
+      <value value="1"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Initial-Macros">
+      <value value="50"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="?background">
+      <value value="&quot;IL1&quot;"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="viral-incubation-threshold">
+      <value value="60"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="macro-phago-recovery">
+      <value value="0.5"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="susceptability-to-infection">
+      <value value="77"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="RandomRuns?">
+      <value value="false"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="epi-apoptosis-on?">
+      <value value="true"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="human-endo-activation">
+      <value value="5"/>
+    </enumeratedValueSet>
+  </experiment>
+  <experiment name="V2.0v5 Fig 4 Human Endo-activation Sweep human-endoactivation 5 -10" repetitions="1" runMetricsEveryStep="false">
+    <setup>setup
+infect</setup>
+    <go>go</go>
+    <timeLimit steps="2016"/>
+    <metric>%system-health</metric>
+    <steppedValueSet variable="human-endo-activation" first="5" step="1" last="10"/>
+    <steppedValueSet variable="RandomSeed" first="1" step="1" last="250"/>
+    <enumeratedValueSet variable="Bat?">
+      <value value="false"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Initial-inoculum">
+      <value value="150"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Metabolic-byproduct">
+      <value value="0.2"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="inflammasome-activation-threshold">
+      <value value="10"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="inflammasome-priming-threshold">
+      <value value="1"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Initial-DCs">
+      <value value="50"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Initial-NKs">
+      <value value="25"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="viral-incubation-rate">
+      <value value="1"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Initial-Macros">
+      <value value="50"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="?background">
+      <value value="&quot;IL1&quot;"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="viral-incubation-threshold">
+      <value value="60"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="macro-phago-recovery">
+      <value value="0.5"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="susceptability-to-infection">
+      <value value="77"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="RandomRuns?">
+      <value value="false"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="epi-apoptosis-on?">
+      <value value="true"/>
+    </enumeratedValueSet>
+  </experiment>
+  <experiment name="V2.0v5 Fig 5 Bat Metabolic-byproduct sweep" repetitions="1" runMetricsEveryStep="false">
+    <setup>setup
+infect</setup>
+    <go>go</go>
+    <timeLimit steps="2016"/>
+    <metric>%system-health</metric>
+    <steppedValueSet variable="Metabolic-byproduct" first="2" step="1" last="10"/>
+    <steppedValueSet variable="RandomSeed" first="1" step="1" last="250"/>
+    <enumeratedValueSet variable="Initial-inoculum">
+      <value value="150"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Bat?">
+      <value value="true"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="inflammasome-activation-threshold">
+      <value value="50"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="inflammasome-priming-threshold">
+      <value value="5"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Initial-DCs">
+      <value value="50"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Initial-NKs">
+      <value value="25"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="viral-incubation-rate">
+      <value value="1"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="Initial-Macros">
+      <value value="50"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="?background">
+      <value value="&quot;IL1&quot;"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="viral-incubation-threshold">
+      <value value="60"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="macro-phago-recovery">
+      <value value="0.5"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="susceptability-to-infection">
+      <value value="77"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="RandomRuns?">
+      <value value="false"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="epi-apoptosis-on?">
+      <value value="true"/>
+    </enumeratedValueSet>
+    <enumeratedValueSet variable="bat-endo-activation">
+      <value value="10"/>
+    </enumeratedValueSet>
+  </experiment>
+</experiments>
+@#$#@#$#@
+@#$#@#$#@
+default
+0.0
+-0.2 0 0.0 1.0
+0.0 1 1.0 0.0
+0.2 0 0.0 1.0
+link direction
+true
+0
+Line -7500403 true 150 150 90 180
+Line -7500403 true 150 150 210 180
+@#$#@#$#@
+1
+@#$#@#$#@
