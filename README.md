@@ -1,5 +1,7 @@
 # Comparative-Biology-Immune-ABM
 
+See document Viruses CBIABM R1 Supplementary Material S1_V3 for instructions on how to run the CBIABM
+
 This model was developed in Netlogo 6.1.1, and requires a download of the Netlogo package in order to run (free download available from https://ccl.northwestern.edu/netlogo/download.shtml ).
 
 See the Info Tab in the executable file for information about the model and how to run the simulation experiments present in the publication.
