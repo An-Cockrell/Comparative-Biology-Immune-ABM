@@ -461,7 +461,7 @@ let p max-one-of neighbors [T1IFN + P/DAMPS]  ;; or neighbors4
     set size 1
     ;; of virus, uses local variable "q" to represent amount of virus eaten (avoid negative values)
     if extracellular-virus > 0
-     [let q max list 0 (extracellular-virus - 10) ;; currently set as arbitrary 10 amount of extracellular virus eaten per step
+     [let q min list 10 extracellular-virus ;; currently set as arbitrary 10 amount of extracellular virus eaten per step
       set extracellular-virus extracellular-virus - q
       set virus-eaten virus-eaten + q
      ]
